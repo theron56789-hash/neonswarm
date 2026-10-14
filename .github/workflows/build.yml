@@ -1,0 +1,75 @@
+name: Build 3DS
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Make icon, banner, sound
+        run: |
+          apt-get update -qq && apt-get install -y -qq python3 unzip wget
+          python3 - <<'EOF'
+          import zlib,struct,wave
+          def png(fn,w,h,f):
+              raw=b''.join(b'\0'+b''.join(bytes(f(x,y)) for x in range(w)) for y in range(h))
+              def ch(t,d):
+                  return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+              open(fn,'wb').write(b'\x89PNG\r\n\x1a\n'+ch(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+ch(b'IDAT',zlib.compress(raw))+ch(b'IEND',b''))
+          def art(w,h):
+              def f(x,y):
+                  d=((x-w/2)**2+(y-h/2)**2)**.5
+                  r=min(w,h)*.3
+                  if d<r: return (25,240,255)
+                  if d<r+max(2,w//40): return (255,59,212)
+                  return (7,7,26)
+              return f
+          png('icon.png',48,48,art(48,48));png('banner.png',256,128,art(256,128))
+          wf=wave.open('sound.wav','wb');wf.setnchannels(1);wf.setsampwidth(2);wf.setframerate(22050);wf.writeframes(b'\0\0'*11025);wf.close()
+          EOF
+      - name: Build 3DSX
+        run: |
+          export PATH=$PATH:/opt/devkitpro/devkitARM/bin:/opt/devkitpro/tools/bin
+          ARCH="-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft"
+          arm-none-eabi-gcc -O2 -mword-relocations -ffunction-sections $ARCH -D__3DS__ -I/opt/devkitpro/libctru/include source/main.c -specs=3dsx.specs $ARCH -L/opt/devkitpro/libctru/lib -lctru -lm -o neonswarm.elf
+          smdhtool --create "Neon Swarm" "Survive the swarm" "Me" icon.png neonswarm.smdh
+          3dsxtool neonswarm.elf neonswarm.3dsx --smdh=neonswarm.smdh
+      - name: Build CIA (best effort)
+        continue-on-error: true
+        run: |
+          export PATH=$PATH:/opt/devkitpro/tools/bin
+          wget -q https://github.com/diasurgical/bannertool/releases/download/1.2.0/bannertool.zip
+          unzip -j bannertool.zip "linux-x86_64/bannertool" -d /opt/devkitpro/tools/bin
+          wget -q https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18/makerom-v0.18-ubuntu_x86_64.zip
+          unzip makerom-v0.18-ubuntu_x86_64.zip makerom -d /opt/devkitpro/tools/bin
+          chmod a+x /opt/devkitpro/tools/bin/bannertool /opt/devkitpro/tools/bin/makerom
+          cat > app.rsf <<'EOF'
+          BasicInfo:
+            Title: NeonSwarm
+            CompanyCode: "00"
+            ProductCode: CTR-P-NSWM
+            ContentType: Application
+            Logo: Nintendo
+          TitleInfo:
+            UniqueId: 0xF8B21
+            Category: Application
+          Option:
+            UseOnSD: true
+            FreeProductCode: true
+            MediaFootPadding: false
+            EnableCrypt: false
+            EnableCompress: true
+          EOF
+          bannertool makebanner -i banner.png -a sound.wav -o banner.bnr
+          bannertool makesmdh -s "Neon Swarm" -l "Neon Swarm" -p "Me" -i icon.png -o icon.icn
+          makerom -f cia -o neonswarm.cia -elf neonswarm.elf -rsf app.rsf -icon icon.icn -banner banner.bnr -exefslogo -target t -desc app:4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: neon-swarm
+          path: |
+            neonswarm.3dsx
+            neonswarm.cia
+          if-no-files-found: warn
